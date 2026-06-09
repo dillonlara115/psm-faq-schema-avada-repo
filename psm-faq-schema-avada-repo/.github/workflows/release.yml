@@ -1,0 +1,40 @@
+name: Release plugin zip
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify plugin header version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          HEADER_VERSION=$(grep -E '^\s*\*\s*Version:' psm-faq-schema-avada/psm-faq-schema-avada.php | head -1 | sed -E 's/.*Version:\s*//' | tr -d ' \r')
+          echo "Tag version:    $TAG_VERSION"
+          echo "Header version: $HEADER_VERSION"
+          if [ "$TAG_VERSION" != "$HEADER_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match plugin header Version: $HEADER_VERSION"
+            exit 1
+          fi
+
+      - name: Build plugin zip
+        run: |
+          zip -r psm-faq-schema-avada.zip psm-faq-schema-avada \
+            -x '*.git*' '*.github*' '*.DS_Store' '*node_modules*'
+          ls -la psm-faq-schema-avada.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: psm-faq-schema-avada.zip
+          generate_release_notes: true
+          name: ${{ github.ref_name }}
