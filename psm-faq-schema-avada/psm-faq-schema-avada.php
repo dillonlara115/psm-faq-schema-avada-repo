@@ -41,7 +41,7 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 	const VERSION     = '1.0.0';
 	const SLUG        = 'psm-faq-schema-avada';
 	const SCHEMA_TAG  = 'psm-faq-schema';
-	const GITHUB_REPO = 'point-source-marketing/psm-faq-schema-avada';   // <-- EDIT to match your repo
+	const GITHUB_REPO = 'dillonlara115/psm-faq-schema-avada-repo';   // <-- EDIT to match your repo
 	const UPDATE_TTL  = 12 * HOUR_IN_SECONDS;
 
 	public static function boot() {
