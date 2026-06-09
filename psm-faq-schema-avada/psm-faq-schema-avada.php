@@ -3,7 +3,7 @@
  * Plugin Name:       PSM FAQ Schema (Avada)
  * Plugin URI:        https://pointsourcemarketing.com/tools/faq-schema
  * Description:       Auto-injects FAQPage JSON-LD by parsing Avada accordion shortcodes marked with the "faq-accordion" CSS class. Self-updates from the PSM update endpoint.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Author:            Point Source Marketing
  * Author URI:        https://pointsourcemarketing.com
  * Requires PHP:      7.4
@@ -38,14 +38,26 @@ if ( class_exists( 'PSM_FAQ_Schema_Avada_Plugin' ) ) {
 
 final class PSM_FAQ_Schema_Avada_Plugin {
 
-	const VERSION     = '1.0.0';
+	const VERSION     = '1.0.1';
 	const SLUG        = 'psm-faq-schema-avada';
 	const SCHEMA_TAG  = 'psm-faq-schema';
-	const GITHUB_REPO = 'dillonlara115/psm-faq-schema-avada-repo';   // <-- EDIT to match your repo
+	const GITHUB_REPO = 'dillonlara115/psm-faq-schema-avada-repo';
 	const UPDATE_TTL  = 12 * HOUR_IN_SECONDS;
+
+	/** Q&A pairs harvested from rendered content (fallback path). */
+	private static $rendered_pairs = [];
+
+	/** True once schema has been printed for this request. */
+	private static $printed = false;
 
 	public static function boot() {
 		add_action( 'wp_head', [ __CLASS__, 'inject' ], 99 );
+
+		// Fallback: harvest Q&A from the *rendered* HTML, print at wp_footer.
+		// Covers Avada versions whose stored shortcode format the head-pass
+		// regex doesn't match. JSON-LD in <body> is valid for Google.
+		add_filter( 'the_content', [ __CLASS__, 'harvest_rendered' ], 99 );
+		add_action( 'wp_footer', [ __CLASS__, 'inject_footer' ], 5 );
 
 		// Self-updater hooks
 		add_filter( 'pre_set_site_transient_update_plugins', [ __CLASS__, 'check_for_update' ] );
@@ -80,7 +92,7 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 
 		if ( $debug ) {
 			printf(
-				"\n<!-- %s v%s | marker=%s | found=%d -->\n",
+				"\n<!-- %s v%s | pass=head(shortcode) | marker=%s | found=%d -->\n",
 				esc_html( self::SCHEMA_TAG ),
 				esc_html( self::VERSION ),
 				esc_html( $marker ),
@@ -92,6 +104,76 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 			return;
 		}
 
+		self::print_schema( $faqs );
+	}
+
+	/**
+	 * the_content filter (priority 99): by this point Avada has rendered its
+	 * shortcodes to HTML. If the head pass found nothing, harvest Q&A pairs
+	 * from the rendered accordion markup instead. Content is returned
+	 * unchanged; pairs are stashed for wp_footer.
+	 */
+	public static function harvest_rendered( $content ) {
+		if ( self::$printed || ! is_singular() || ! in_the_loop() || ! is_main_query() ) {
+			return $content;
+		}
+
+		$marker = (string) apply_filters( 'psm_faq_schema_class_marker', 'faq-accordion' );
+
+		if ( false === strpos( $content, $marker ) ) {
+			return $content;
+		}
+
+		$pairs = self::extract_faqs_from_html( $content, $marker );
+		if ( count( $pairs ) > count( self::$rendered_pairs ) ) {
+			self::$rendered_pairs = $pairs;
+		}
+
+		return $content;
+	}
+
+	/**
+	 * wp_footer: print schema from the rendered-HTML pass if the head pass
+	 * didn't already. JSON-LD placed in <body> is valid and read by Google.
+	 */
+	public static function inject_footer() {
+		if ( self::$printed || ! is_singular() ) {
+			return;
+		}
+
+		$post = get_post();
+		if ( ! $post || ! apply_filters( 'psm_faq_schema_enabled', true, $post ) ) {
+			return;
+		}
+
+		$min   = (int) apply_filters( 'psm_faq_schema_min_count', 2 );
+		$debug = (bool) apply_filters( 'psm_faq_schema_debug', false );
+
+		$faqs = apply_filters( 'psm_faq_schema_data', self::$rendered_pairs, $post );
+
+		if ( $debug ) {
+			printf(
+				"\n<!-- %s v%s | pass=footer(rendered-html) | found=%d -->\n",
+				esc_html( self::SCHEMA_TAG ),
+				esc_html( self::VERSION ),
+				count( $faqs )
+			);
+		}
+
+		if ( count( $faqs ) < $min ) {
+			return;
+		}
+
+		self::print_schema( $faqs );
+	}
+
+	/**
+	 * Encode and print the FAQPage JSON-LD block. Sets the printed flag so
+	 * the two passes never double-emit.
+	 *
+	 * @param array<int,array{q:string,a:string}> $faqs
+	 */
+	private static function print_schema( $faqs ) {
 		$schema = [
 			'@context'   => 'https://schema.org',
 			'@type'      => 'FAQPage',
@@ -115,11 +197,88 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 			return;
 		}
 
+		self::$printed = true;
+
 		printf(
 			"\n<script type=\"application/ld+json\" data-source=\"%s\">%s</script>\n",
 			esc_attr( self::SCHEMA_TAG ),
 			$json
 		);
+	}
+
+	/**
+	 * Extract Q&A pairs from *rendered* Avada accordion HTML.
+	 *
+	 * Looks for any element whose class list contains the marker class, then
+	 * collects .fusion-toggle-heading (question) and .panel-body /
+	 * .toggle-content (answer) pairs inside each .fusion-panel.
+	 *
+	 * @param string $html   Rendered content HTML.
+	 * @param string $marker CSS class marking FAQ accordions.
+	 * @return array<int,array{q:string,a:string}>
+	 */
+	private static function extract_faqs_from_html( $html, $marker ) {
+		$pairs = [];
+
+		if ( '' === trim( $html ) || ! class_exists( 'DOMDocument' ) ) {
+			return $pairs;
+		}
+
+		$prev_errors = libxml_use_internal_errors( true );
+		$dom         = new DOMDocument();
+		// Hint UTF-8 to the parser; rendered fragments have no <head> charset.
+		$loaded = $dom->loadHTML(
+			'<?xml encoding="UTF-8"><div id="psm-faq-root">' . $html . '</div>',
+			LIBXML_NONET
+		);
+		libxml_clear_errors();
+		libxml_use_internal_errors( $prev_errors );
+
+		if ( ! $loaded ) {
+			return $pairs;
+		}
+
+		$xpath       = new DOMXPath( $dom );
+		$class_match = "contains(concat(' ', normalize-space(@class), ' '), ' " . $marker . " ')";
+		$accordions  = $xpath->query( '//*[' . $class_match . ']' );
+
+		if ( ! $accordions || 0 === $accordions->length ) {
+			return $pairs;
+		}
+
+		foreach ( $accordions as $accordion ) {
+			$panels = $xpath->query(
+				".//*[contains(concat(' ', normalize-space(@class), ' '), ' fusion-panel ')]",
+				$accordion
+			);
+			if ( ! $panels ) {
+				continue;
+			}
+
+			foreach ( $panels as $panel ) {
+				$q_node = $xpath->query(
+					".//*[contains(concat(' ', normalize-space(@class), ' '), ' fusion-toggle-heading ')]",
+					$panel
+				);
+				$a_node = $xpath->query(
+					".//*[contains(concat(' ', normalize-space(@class), ' '), ' panel-body ')]" .
+					" | .//*[contains(concat(' ', normalize-space(@class), ' '), ' toggle-content ')]",
+					$panel
+				);
+
+				$q = ( $q_node && $q_node->length ) ? $q_node->item( 0 )->textContent : '';
+				$a = ( $a_node && $a_node->length ) ? $a_node->item( 0 )->textContent : '';
+
+				$q = trim( preg_replace( '/\s+/', ' ', $q ) );
+				$a = trim( preg_replace( '/\s+/', ' ', $a ) );
+
+				if ( '' !== $q && '' !== $a ) {
+					$pairs[] = [ 'q' => $q, 'a' => $a ];
+				}
+			}
+		}
+
+		return $pairs;
 	}
 
 	private static function extract_faqs( $content, $marker ) {
