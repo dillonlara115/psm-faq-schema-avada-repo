@@ -3,7 +3,7 @@
  * Plugin Name:       PSM FAQ Schema (Avada)
  * Plugin URI:        https://pointsourcemarketing.com/tools/faq-schema
  * Description:       Auto-injects FAQPage JSON-LD by parsing Avada accordion shortcodes marked with the "faq-accordion" CSS class. Self-updates from the PSM update endpoint.
- * Version:           1.0.1
+ * Version:           1.0.2
  * Author:            Point Source Marketing
  * Author URI:        https://pointsourcemarketing.com
  * Requires PHP:      7.4
@@ -38,7 +38,7 @@ if ( class_exists( 'PSM_FAQ_Schema_Avada_Plugin' ) ) {
 
 final class PSM_FAQ_Schema_Avada_Plugin {
 
-	const VERSION     = '1.0.1';
+	const VERSION     = '1.0.2';
 	const SLUG        = 'psm-faq-schema-avada';
 	const SCHEMA_TAG  = 'psm-faq-schema';
 	const GITHUB_REPO = 'dillonlara115/psm-faq-schema-avada-repo';
@@ -246,9 +246,14 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 			return $pairs;
 		}
 
+		$seen = [];
+
 		foreach ( $accordions as $accordion ) {
+			// descendant-or-self: when the marker is on the accordion wrapper the
+			// panels are descendants; when it's on each toggle the marked node IS
+			// a .fusion-panel, so it must match itself too.
 			$panels = $xpath->query(
-				".//*[contains(concat(' ', normalize-space(@class), ' '), ' fusion-panel ')]",
+				"descendant-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' fusion-panel ')]",
 				$accordion
 			);
 			if ( ! $panels ) {
@@ -256,6 +261,13 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 			}
 
 			foreach ( $panels as $panel ) {
+				// A marked accordion and its marked toggles can both match; dedupe.
+				$oid = spl_object_id( $panel );
+				if ( isset( $seen[ $oid ] ) ) {
+					continue;
+				}
+				$seen[ $oid ] = true;
+
 				$q_node = $xpath->query(
 					".//*[contains(concat(' ', normalize-space(@class), ' '), ' fusion-toggle-heading ')]",
 					$panel
@@ -284,23 +296,38 @@ final class PSM_FAQ_Schema_Avada_Plugin {
 	private static function extract_faqs( $content, $marker ) {
 		$faqs           = [];
 		$marker_escaped = preg_quote( $marker, '/' );
-		$accordion_re   = '/\[fusion_accordion\b[^\]]*\bclass\s*=\s*["\'][^"\']*\b' . $marker_escaped . '\b[^"\']*["\'][^\]]*\](.*?)\[\/fusion_accordion\]/is';
 
-		if ( ! preg_match_all( $accordion_re, $content, $accordion_matches ) ) {
+		// The marker may live on the accordion's CSS Class field or on each
+		// individual toggle's. Capture every accordion's opening attributes and
+		// its inner shortcodes, then decide per-toggle whether it's marked.
+		$accordion_re     = '/\[fusion_accordion\b([^\]]*)\](.*?)\[\/fusion_accordion\]/is';
+		$class_has_marker = '/\bclass\s*=\s*["\'][^"\']*\b' . $marker_escaped . '\b[^"\']*["\']/i';
+		$toggle_re        = '/\[fusion_toggle\s+([^\]]+)\](.*?)\[\/fusion_toggle\]/is';
+
+		if ( ! preg_match_all( $accordion_re, $content, $accordion_matches, PREG_SET_ORDER ) ) {
 			return $faqs;
 		}
 
-		foreach ( $accordion_matches[1] as $accordion_inner ) {
-			$toggle_re = '/\[fusion_toggle\s+([^\]]+)\](.*?)\[\/fusion_toggle\]/is';
-			if ( ! preg_match_all( $toggle_re, $accordion_inner, $toggle_matches ) ) {
+		foreach ( $accordion_matches as $accordion ) {
+			$accordion_marked = (bool) preg_match( $class_has_marker, $accordion[1] );
+
+			if ( ! preg_match_all( $toggle_re, $accordion[2], $toggle_matches, PREG_SET_ORDER ) ) {
 				continue;
 			}
 
-			$count = count( $toggle_matches[0] );
-			for ( $i = 0; $i < $count; $i++ ) {
-				$attrs = shortcode_parse_atts( $toggle_matches[1][ $i ] );
+			foreach ( $toggle_matches as $toggle ) {
+				$attrs = shortcode_parse_atts( $toggle[1] );
+
+				// Include the toggle if the accordion is marked, or the toggle
+				// itself carries the marker class.
+				$toggle_marked = isset( $attrs['class'] )
+					&& preg_match( '/\b' . $marker_escaped . '\b/i', $attrs['class'] );
+				if ( ! $accordion_marked && ! $toggle_marked ) {
+					continue;
+				}
+
 				$title = isset( $attrs['title'] ) ? (string) $attrs['title'] : '';
-				$body  = $toggle_matches[2][ $i ];
+				$body  = $toggle[2];
 
 				$body  = do_shortcode( $body );
 				$body  = wp_strip_all_tags( $body );
