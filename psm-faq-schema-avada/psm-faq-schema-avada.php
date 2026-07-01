@@ -3,7 +3,7 @@
  * Plugin Name:       PSM FAQ Schema (Avada)
  * Plugin URI:        https://pointsourcemarketing.com/tools/faq-schema
  * Description:       Auto-injects FAQPage JSON-LD by parsing Avada accordion shortcodes marked with the "faq-accordion" CSS class. Self-updates from the PSM update endpoint.
- * Version:           1.0.2
+ * Version:           1.0.3
  * Author:            Point Source Marketing
  * Author URI:        https://pointsourcemarketing.com
  * Requires PHP:      7.4
@@ -38,7 +38,7 @@ if (class_exists("PSM_FAQ_Schema_Avada_Plugin")) {
 
 final class PSM_FAQ_Schema_Avada_Plugin
 {
-    const VERSION = "1.0.2";
+    const VERSION = "1.0.3";
     const SLUG = "psm-faq-schema-avada";
     const SCHEMA_TAG = "psm-faq-schema";
     const GITHUB_REPO = "dillonlara115/psm-faq-schema-avada-repo";
